@@ -1,4 +1,3 @@
-import { ImageInfo } from 'dockerode'
 import ApiStatusCodes from '../api/ApiStatusCodes'
 import DataStore from '../datastore/DataStore'
 import DockerApi, { IDockerUpdateOrders } from '../docker/DockerApi'
@@ -9,6 +8,11 @@ import Utils from '../utils/Utils'
 import Authenticator from './Authenticator'
 import DockerRegistryHelper from './DockerRegistryHelper'
 import ImageMaker, { BuildLogsManager } from './ImageMaker'
+import { EventLogger } from './events/EventLogger'
+import {
+    CapRoverEventFactory,
+    CapRoverEventType,
+} from './events/ICapRoverEvent'
 import DomainResolveChecker from './system/DomainResolveChecker'
 import LoadBalancerManager from './system/LoadBalancerManager'
 import requireFromString = require('require-from-string')
@@ -37,6 +41,7 @@ class ServiceManager {
         dataStore: DataStore,
         dockerApi: DockerApi,
         loadBalancerManager: LoadBalancerManager,
+        eventLogger: EventLogger,
         domainResolveChecker: DomainResolveChecker
     ) {
         if (!serviceMangerCache[namespace]) {
@@ -45,6 +50,7 @@ class ServiceManager {
                 authenticator,
                 dockerApi,
                 loadBalancerManager,
+                eventLogger,
                 domainResolveChecker
             )
         }
@@ -63,6 +69,7 @@ class ServiceManager {
         private authenticator: Authenticator,
         private dockerApi: DockerApi,
         private loadBalancerManager: LoadBalancerManager,
+        private eventLogger: EventLogger,
         private domainResolveChecker: DomainResolveChecker
     ) {
         this.activeOrScheduledBuilds = {}
@@ -189,6 +196,16 @@ class ServiceManager {
             })
             .then(function () {
                 self.onBuildFinished(appName)
+
+                self.eventLogger.trackEvent(
+                    CapRoverEventFactory.create(
+                        CapRoverEventType.AppBuildSuccessful,
+                        {
+                            appName,
+                        }
+                    )
+                )
+
                 return self.ensureServiceInitedAndUpdated(appName)
             })
             .catch(function (error) {
@@ -438,40 +455,51 @@ class ServiceManager {
             })
     }
 
-    removeApp(appName: string) {
-        Logger.d(`Removing service for: ${appName}`)
+    removeApps(appNames: string[]) {
+        Logger.d(`Removing service for: ${appNames.join(', ')}`)
         const self = this
 
-        const serviceName = this.dataStore
-            .getAppsDataStore()
-            .getServiceName(appName)
-        const dockerApi = this.dockerApi
-        const dataStore = this.dataStore
+        const removeAppPromise = function (appName: string) {
+            const serviceName = self.dataStore
+                .getAppsDataStore()
+                .getServiceName(appName)
+            const dockerApi = self.dockerApi
+            const dataStore = self.dataStore
 
-        return Promise.resolve()
-            .then(function () {
-                return self.ensureNotBuilding(appName)
-            })
-            .then(function () {
-                Logger.d(`Check if service is running: ${serviceName}`)
-                return dockerApi.isServiceRunningByName(serviceName)
-            })
-            .then(function (isRunning) {
-                if (isRunning) {
-                    return dockerApi.removeServiceByName(serviceName)
-                } else {
-                    Logger.w(
-                        `Cannot delete service... It is not running: ${serviceName}`
-                    )
-                    return true
-                }
-            })
-            .then(function () {
-                return dataStore.getAppsDataStore().deleteAppDefinition(appName)
-            })
-            .then(function () {
-                return self.reloadLoadBalancer()
-            })
+            return Promise.resolve()
+                .then(function () {
+                    return self.ensureNotBuilding(appName)
+                })
+                .then(function () {
+                    Logger.d(`Check if service is running: ${serviceName}`)
+                    return dockerApi.isServiceRunningByName(serviceName)
+                })
+                .then(function (isRunning) {
+                    if (isRunning) {
+                        return dockerApi.removeServiceByName(serviceName)
+                    } else {
+                        Logger.w(
+                            `Cannot delete service... It is not running: ${serviceName}`
+                        )
+                        return true
+                    }
+                })
+                .then(function () {
+                    return dataStore
+                        .getAppsDataStore()
+                        .deleteAppDefinition(appName)
+                })
+                .then(function () {
+                    return self.reloadLoadBalancer()
+                })
+        }
+
+        const promises = []
+        for (const appName of appNames) {
+            promises.push(removeAppPromise(appName))
+        }
+
+        return Promise.all(promises)
     }
 
     removeVolsSafe(volumes: string[]) {
@@ -520,85 +548,6 @@ class ServiceManager {
             })
     }
 
-    getUnusedImages(mostRecentLimit: number) {
-        Logger.d(
-            `Getting unused images, excluding most recent ones: ${mostRecentLimit}`
-        )
-
-        const dockerApi = this.dockerApi
-        const dataStore = this.dataStore
-        let allImages: ImageInfo[]
-
-        return Promise.resolve()
-            .then(function () {
-                return dockerApi.getImages()
-            })
-            .then(function (images) {
-                allImages = images
-
-                return dataStore.getAppsDataStore().getAppDefinitions()
-            })
-            .then(function (apps) {
-                const unusedImages = []
-
-                if (mostRecentLimit < 0) {
-                    throw ApiStatusCodes.createError(
-                        ApiStatusCodes.ILLEGAL_PARAMETER,
-                        'Most Recent Limit cannot be negative'
-                    )
-                }
-
-                for (let i = 0; i < allImages.length; i++) {
-                    const currentImage = allImages[i]
-                    let imageInUse = false
-
-                    const repoTags = currentImage.RepoTags || []
-
-                    Object.keys(apps).forEach(function (appName) {
-                        const app = apps[appName]
-                        for (let k = 0; k < mostRecentLimit + 1; k++) {
-                            const versionToCheck =
-                                Number(app.deployedVersion) - k
-
-                            if (versionToCheck < 0) continue
-
-                            let deployedImage = ''
-                            app.versions.forEach((v) => {
-                                if (v.version === versionToCheck) {
-                                    deployedImage = v.deployedImageName || ''
-                                }
-                            })
-
-                            if (!deployedImage) continue
-
-                            if (repoTags.indexOf(deployedImage) >= 0) {
-                                imageInUse = true
-                            }
-                        }
-                    })
-
-                    if (!imageInUse) {
-                        unusedImages.push({
-                            id: currentImage.Id,
-                            tags: repoTags,
-                        })
-                    }
-                }
-
-                return unusedImages
-            })
-    }
-
-    deleteImages(imageIds: string[]) {
-        Logger.d('Deleting images...')
-
-        const dockerApi = this.dockerApi
-
-        return Promise.resolve().then(function () {
-            return dockerApi.deleteImages(imageIds)
-        })
-    }
-
     createPreDeployFunctionIfExist(
         app: IAppDef
     ): PreDeployFunction | undefined {
@@ -643,6 +592,7 @@ class ServiceManager {
         captainDefinitionRelativeFilePath: string,
         envVars: IAppEnvVar[],
         volumes: IAppVolume[],
+        tags: IAppTag[],
         nodeId: string,
         notExposeAsWebApp: boolean,
         containerHttpPort: number,
@@ -651,6 +601,7 @@ class ServiceManager {
         ports: IAppPort[],
         repoInfo: RepoInfo,
         customNginxConfig: string,
+        redirectDomain: string,
         preDeployFunction: string,
         serviceUpdateOverride: string,
         websocketSupport: boolean,
@@ -762,6 +713,7 @@ class ServiceManager {
                         captainDefinitionRelativeFilePath,
                         envVars,
                         volumes,
+                        tags,
                         nodeId,
                         notExposeAsWebApp,
                         containerHttpPort,
@@ -771,6 +723,7 @@ class ServiceManager {
                         repoInfo,
                         self.authenticator,
                         customNginxConfig,
+                        redirectDomain,
                         preDeployFunction,
                         serviceUpdateOverride,
                         websocketSupport,
@@ -817,7 +770,15 @@ class ServiceManager {
     }
 
     logBuildFailed(appName: string, error: string) {
+        const self = this
         error = (error || '') + ''
+
+        self.eventLogger.trackEvent(
+            CapRoverEventFactory.create(CapRoverEventType.AppBuildFailed, {
+                appName,
+                error: error.substring(0, 1000),
+            })
+        )
         this.buildLogsManager.getAppBuildLogs(appName).onBuildFailed(error)
     }
 

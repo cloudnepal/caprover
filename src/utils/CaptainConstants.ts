@@ -2,7 +2,7 @@ import fs = require('fs-extra')
 import path = require('path')
 import EnvVars from './EnvVars'
 
-const CAPTAIN_BASE_DIRECTORY = '/captain'
+const CAPTAIN_BASE_DIRECTORY = EnvVars.CAPTAIN_BASE_DIRECTORY || '/captain'
 const CAPTAIN_DATA_DIRECTORY = CAPTAIN_BASE_DIRECTORY + '/data' // data that sits here can be backed up
 const CAPTAIN_ROOT_DIRECTORY_TEMP = CAPTAIN_BASE_DIRECTORY + '/temp'
 const CAPTAIN_ROOT_DIRECTORY_GENERATED = CAPTAIN_BASE_DIRECTORY + '/generated'
@@ -17,7 +17,7 @@ const CONSTANT_FILE_OVERRIDE_USER =
 const configs = {
     publishedNameOnDockerHub: 'caprover/caprover',
 
-    version: '1.10.1',
+    version: '1.11.1',
 
     defaultMaxLogSize: '512m',
 
@@ -41,11 +41,19 @@ const configs = {
 
     appPlaceholderImageName: 'caprover/caprover-placeholder-app:latest',
 
-    nginxImageName: 'nginx:1',
+    nginxImageName: 'nginx:1.24',
 
     defaultEmail: 'runner@caprover.com',
 
     captainSubDomain: 'captain',
+
+    overlayNetworkOverride: {},
+
+    useExistingSwarm: false,
+
+    proApiDomains: ['https://pro.caprover.com'],
+
+    analyticsDomain: 'https://analytics-v1.caprover.com',
 }
 
 const data = {
@@ -161,6 +169,8 @@ const data = {
 
     headerNamespace: 'x-namespace',
 
+    headerCapRoverVersion: 'x-caprover-version',
+
     // *********************     ETC       ************************
 
     disableFirewallCommand:
@@ -169,7 +179,7 @@ const data = {
     gitShaEnvVarKey: 'CAPROVER_GIT_COMMIT_SHA',
 }
 
-function overrideFromFile(fileName: string) {
+function overrideConfigFromFile(fileName: string) {
     const overridingValuesConfigs = fs.readJsonSync(fileName, {
         throws: false,
     })
@@ -188,9 +198,9 @@ function overrideFromFile(fileName: string) {
     }
 }
 
-overrideFromFile(CONSTANT_FILE_OVERRIDE_BUILD)
+overrideConfigFromFile(CONSTANT_FILE_OVERRIDE_BUILD)
 
-overrideFromFile(CONSTANT_FILE_OVERRIDE_USER)
+overrideConfigFromFile(CONSTANT_FILE_OVERRIDE_USER)
 
 if (data.isDebug) {
     const devDirectoryOnLocalMachine = fs

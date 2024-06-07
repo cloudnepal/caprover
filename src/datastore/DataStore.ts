@@ -3,9 +3,14 @@
  */
 import Configstore = require('configstore')
 import fs = require('fs-extra')
+import {
+    AutomatedCleanupConfigsCleaner,
+    IAutomatedCleanupConfigs,
+} from '../models/AutomatedCleanupConfigs'
 import CaptainConstants from '../utils/CaptainConstants'
 import CaptainEncryptor from '../utils/Encryptor'
 import AppsDataStore from './AppsDataStore'
+import ProDataStore from './ProDataStore'
 import RegistriesDataStore from './RegistriesDataStore'
 
 // keys:
@@ -20,6 +25,8 @@ const NET_DATA_INFO = 'netDataInfo'
 const NGINX_BASE_CONFIG = 'nginxBaseConfig'
 const NGINX_CAPTAIN_CONFIG = 'nginxCaptainConfig'
 const CUSTOM_ONE_CLICK_APP_URLS = 'oneClickAppUrls'
+const FEATURE_FLAGS = 'featureFlags'
+const AUTOMATED_CLEANUP = 'automatedCleanup'
 
 const DEFAULT_CAPTAIN_ROOT_DOMAIN = 'captain.localhost'
 
@@ -33,9 +40,11 @@ const DEFAULT_NGINX_CAPTAIN_CONFIG = fs
 let DEFAULT_NGINX_CONFIG_FOR_APP_PATH =
     __dirname + '/../../template/server-block-conf.ejs'
 
-if (fs.pathExistsSync('/captain/data/server-block-conf-override.ejs')) {
-    DEFAULT_NGINX_CONFIG_FOR_APP_PATH =
-        '/captain/data/server-block-conf-override.ejs'
+const SERVER_BLOCK_CONF_OVERRIDE_PATH =
+    CaptainConstants.captainDataDirectory + '/server-block-conf-override.ejs'
+
+if (fs.pathExistsSync(SERVER_BLOCK_CONF_OVERRIDE_PATH)) {
+    DEFAULT_NGINX_CONFIG_FOR_APP_PATH = SERVER_BLOCK_CONF_OVERRIDE_PATH
 }
 
 const DEFAULT_NGINX_CONFIG_FOR_APP = fs
@@ -48,6 +57,7 @@ class DataStore {
     private data: Configstore
     private appsDataStore: AppsDataStore
     private registriesDataStore: RegistriesDataStore
+    proDataStore: ProDataStore
 
     constructor(namespace: string) {
         const data = new Configstore(
@@ -62,6 +72,7 @@ class DataStore {
         this.namespace = namespace
         this.data.set(NAMESPACE, namespace)
         this.appsDataStore = new AppsDataStore(this.data, namespace)
+        this.proDataStore = new ProDataStore(this.data)
         this.registriesDataStore = new RegistriesDataStore(this.data, namespace)
     }
 
@@ -75,6 +86,18 @@ class DataStore {
         return this.data.get(NAMESPACE)
     }
 
+    getFeatureFlags(): any {
+        const self = this
+        return self.data.get(FEATURE_FLAGS)
+    }
+
+    setFeatureFlags(featureFlags: any) {
+        const self = this
+        return Promise.resolve().then(function () {
+            return self.data.set(FEATURE_FLAGS, featureFlags)
+        })
+    }
+
     setHashedPassword(newHashedPassword: string) {
         const self = this
         return Promise.resolve().then(function () {
@@ -86,6 +109,30 @@ class DataStore {
         const self = this
         return Promise.resolve().then(function () {
             return self.data.get(HASHED_PASSWORD)
+        })
+    }
+
+    setDiskCleanupConfigs(configs: IAutomatedCleanupConfigs) {
+        const self = this
+        return Promise.resolve().then(function () {
+            return self.data.set(
+                AUTOMATED_CLEANUP,
+                AutomatedCleanupConfigsCleaner.cleanup(configs)
+            )
+        })
+    }
+
+    getDiskCleanupConfigs(): Promise<IAutomatedCleanupConfigs> {
+        const self = this
+        return Promise.resolve().then(function () {
+            return (
+                self.data.get(AUTOMATED_CLEANUP) ||
+                AutomatedCleanupConfigsCleaner.cleanup({
+                    mostRecentLimit: 0,
+                    cronSchedule: '',
+                    timezone: '',
+                })
+            )
         })
     }
 
@@ -146,6 +193,10 @@ class DataStore {
 
     getAppsDataStore() {
         return this.appsDataStore
+    }
+
+    getProDataStore() {
+        return this.proDataStore
     }
 
     getRegistriesDataStore() {

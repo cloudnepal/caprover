@@ -9,9 +9,17 @@ import Logger from '../../utils/Logger'
 import MigrateCaptainDuckDuck from '../../utils/MigrateCaptainDuckDuck'
 import Utils from '../../utils/Utils'
 import Authenticator from '../Authenticator'
+import FeatureFlags from '../FeatureFlags'
 import ServiceManager from '../ServiceManager'
+import { EventLoggerFactory } from '../events/EventLogger'
+import {
+    CapRoverEventFactory,
+    CapRoverEventType,
+} from '../events/ICapRoverEvent'
+import ProManager from '../pro/ProManager'
 import BackupManager from './BackupManager'
 import CertbotManager from './CertbotManager'
+import DiskCleanupManager from './DiskCleanupManager'
 import DomainResolveChecker from './DomainResolveChecker'
 import LoadBalancerManager from './LoadBalancerManager'
 import SelfHostedDockerRegistry from './SelfHostedDockerRegistry'
@@ -34,6 +42,7 @@ class CaptainManager {
     private certbotManager: CertbotManager
     private loadBalancerManager: LoadBalancerManager
     private domainResolveChecker: DomainResolveChecker
+    private diskCleanupManager: DiskCleanupManager
     private dockerRegistry: SelfHostedDockerRegistry
     private backupManager: BackupManager
     private myNodeId: string | undefined
@@ -60,6 +69,10 @@ class CaptainManager {
         this.domainResolveChecker = new DomainResolveChecker(
             this.loadBalancerManager,
             this.certbotManager
+        )
+        this.diskCleanupManager = new DiskCleanupManager(
+            this.dataStore,
+            dockerApi
         )
         this.myNodeId = undefined
         this.inited = false
@@ -136,7 +149,8 @@ class CaptainManager {
             })
             .then(function () {
                 return dockerApi.ensureOverlayNetwork(
-                    CaptainConstants.captainNetworkName
+                    CaptainConstants.captainNetworkName,
+                    CaptainConstants.configs.overlayNetworkOverride
                 )
             })
             .then(function () {
@@ -244,9 +258,26 @@ class CaptainManager {
                 )
             })
             .then(function () {
+                return self.diskCleanupManager.init()
+            })
+            .then(function () {
                 self.inited = true
 
                 self.performHealthCheck()
+
+                EventLoggerFactory.get(
+                    new ProManager(
+                        self.dataStore.getProDataStore(),
+                        FeatureFlags.get(self.dataStore)
+                    )
+                )
+                    .getLogger()
+                    .trackEvent(
+                        CapRoverEventFactory.create(
+                            CapRoverEventType.InstanceStarted,
+                            {}
+                        )
+                    )
 
                 Logger.d(
                     '**** Captain is initialized and ready to serve you! ****'
@@ -434,6 +465,10 @@ class CaptainManager {
         return this.certbotManager
     }
 
+    getDiskCleanupManager() {
+        return this.diskCleanupManager
+    }
+
     isInitialized() {
         return (
             this.inited &&
@@ -458,6 +493,12 @@ class CaptainManager {
                     self.dataStore,
                     self.dockerApi,
                     CaptainManager.get().getLoadBalanceManager(),
+                    EventLoggerFactory.get(
+                        new ProManager(
+                            self.dataStore.getProDataStore(),
+                            FeatureFlags.get(self.dataStore)
+                        )
+                    ).getLogger(),
                     CaptainManager.get().getDomainResolveChecker()
                 )
                 Object.keys(apps).forEach((appName) => {
@@ -568,6 +609,24 @@ class CaptainManager {
                         envVars.push({
                             key: 'SSMTP_PASS',
                             value: netDataInfo.data.smtp.password,
+                        })
+
+                        // See: https://github.com/titpetric/netdata#changelog
+                        const otherEnvVars: any[] = []
+                        envVars.forEach((e) => {
+                            otherEnvVars.push({
+                                // change SSMTP to SMTP
+                                key: e.key.replace('SSMTP_', 'SMTP_'),
+                                value: e.value,
+                            })
+                        })
+                        envVars.push(...otherEnvVars)
+
+                        envVars.push({
+                            key: 'SMTP_STARTTLS',
+                            value: netDataInfo.data.smtp.allowNonTls
+                                ? ''
+                                : 'on',
                         })
                     }
 
