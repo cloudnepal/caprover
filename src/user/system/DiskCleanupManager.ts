@@ -5,10 +5,14 @@ import DataStore from '../../datastore/DataStore'
 import DockerApi from '../../docker/DockerApi'
 import { IAutomatedCleanupConfigs } from '../../models/AutomatedCleanupConfigs'
 import Logger from '../../utils/Logger'
+import Utils from '../../utils/Utils'
 
 export default class DiskCleanupManager {
     private job: CronJob | undefined
-    constructor(private dataStore: DataStore, private dockerApi: DockerApi) {
+    constructor(
+        private dataStore: DataStore,
+        private dockerApi: DockerApi
+    ) {
         //
     }
 
@@ -168,18 +172,7 @@ export default class DiskCleanupManager {
                     return // no need to validate cron schedule
                 }
 
-                try {
-                    const testJob = new CronJob(
-                        configs.cronSchedule, // cronTime
-                        function () {
-                            // nothing
-                        }, // onTick
-                        null, // onComplete
-                        false, // start
-                        configs.timezone // timezone
-                    )
-                    testJob.stop()
-                } catch (e) {
+                if (!Utils.validateCron(configs.cronSchedule)) {
                     throw ApiStatusCodes.createError(
                         ApiStatusCodes.ILLEGAL_PARAMETER,
                         'Invalid cron schedule'

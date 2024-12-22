@@ -6,6 +6,8 @@ import { v4 as uuid } from 'uuid'
 import ApiStatusCodes from '../../api/ApiStatusCodes'
 import DataStore from '../../datastore/DataStore'
 import DockerApi from '../../docker/DockerApi'
+import { IAllAppDefinitions } from '../../models/AppDefinition'
+import { IServerBlockDetails } from '../../models/IServerBlockDetails'
 import LoadBalancerInfo from '../../models/LoadBalancerInfo'
 import { AnyError } from '../../models/OtherTypes'
 import CaptainConstants from '../../utils/CaptainConstants'
@@ -45,9 +47,8 @@ const DH_PARAMS_FILE_PATH_ON_NGINX = path.join(
 class LoadBalancerManager {
     private reloadInProcess: boolean
     private requestedReloadPromises: {
-        dataStore: DataStore
-        resolve: VoidFunction
-        reject: (reason: any) => void
+        resolveFunc: VoidFunction
+        rejectFunc: (reason: any) => void
     }[]
     private captainPublicRandomKey: string
 
@@ -63,26 +64,17 @@ class LoadBalancerManager {
 
     /**
      * Reloads the configuation for NGINX.
-     * NOTE that this can return synchronously with UNDEFINED if there is already a process in the background.
-     * @param dataStoreToQueue
      * @returns {Promise.<>}
      */
-    rePopulateNginxConfigFile(dataStoreToQueue: DataStore, noReload?: boolean) {
+    rePopulateNginxConfigFile() {
         const self = this
 
         return new Promise<void>(function (res, rej) {
             self.requestedReloadPromises.push({
-                dataStore: dataStoreToQueue,
-                resolve: res,
-                reject: rej,
+                resolveFunc: res,
+                rejectFunc: rej,
             })
             self.consumeQueueIfAnyInNginxReloadQueue()
-        }).then(function () {
-            if (noReload) return
-            Logger.d('sendReloadSignal...')
-            return self.dockerApi.sendSingleContainerKillHUP(
-                CaptainConstants.nginxServiceName
-            )
         })
     }
 
@@ -104,12 +96,10 @@ class LoadBalancerManager {
 
         self.reloadInProcess = true
 
-        const dataStore = q.dataStore
-
         // This will resolve to something like: /captain/nginx/conf.d/captain
         const configFilePathBase = `${
             CaptainConstants.perAppNginxConfigPathBase
-        }/${dataStore.getNameSpace()}`
+        }/${self.dataStore.getNameSpace()}`
 
         const FUTURE = configFilePathBase + '.fut'
         const BACKUP = configFilePathBase + '.bak'
@@ -122,7 +112,7 @@ class LoadBalancerManager {
                 return fs.remove(FUTURE)
             })
             .then(function () {
-                return self.getServerList(dataStore)
+                return self.getServerList()
             })
             .then(function (servers) {
                 const promises: Promise<void>[] = []
@@ -193,25 +183,67 @@ class LoadBalancerManager {
                 return self.ensureBaseNginxConf()
             })
             .then(function () {
-                return self.createRootConfFile(dataStore)
+                return self.createRootConfFile()
+            })
+            .then(function () {
+                return self.validateNginxConfigAndReload()
             })
             .then(function () {
                 Logger.d('SUCCESS: UNLocking NGINX configuration reloading...')
                 self.reloadInProcess = false
-                q.resolve()
+                q.resolveFunc()
                 self.consumeQueueIfAnyInNginxReloadQueue()
             })
             .catch(function (error: AnyError) {
                 Logger.e(error)
                 Logger.d('Error: UNLocking NGINX configuration reloading...')
                 self.reloadInProcess = false
-                q.reject(error)
+                q.rejectFunc(error)
                 self.consumeQueueIfAnyInNginxReloadQueue()
             })
     }
 
-    getServerList(dataStore: DataStore) {
+    validateNginxConfigAndReload() {
         const self = this
+        return Promise.resolve()
+            .then(function () {
+                return self.dockerApi.executeCommand(
+                    CaptainConstants.nginxServiceName,
+                    ['nginx', '-t']
+                )
+            })
+            .then(function (result) {
+                // nginx:1.24
+                // Failed example:
+                //
+                // 2024/08/11 22:32:59 [emerg] 28#28: unknown directive "eventsxxx" in /etc/nginx/nginx.conf:8
+                // nginx: [emerg] unknown directive "eventsxxx" in /etc/nginx/nginx.conf:8
+                // nginx: configuration file /etc/nginx/nginx.conf test failed
+
+                // Successful example:
+                //
+                // nginx: the configuration file /etc/nginx/nginx.conf syntax is ok
+                // nginx: configuration file /etc/nginx/nginx.conf test is successful
+
+                if (result.indexOf('test is successful') < 0) {
+                    throw ApiStatusCodes.createError(
+                        ApiStatusCodes.STATUS_ERROR_NGINX_VALIDATION_FAILED,
+                        result
+                    )
+                }
+            })
+            .then(function () {
+                Logger.d('sendReloadSignal...')
+                return self.dockerApi.sendSingleContainerKillHUP(
+                    CaptainConstants.nginxServiceName
+                )
+            })
+    }
+
+    getServerList() {
+        const self = this
+
+        const dataStore = self.dataStore
 
         let hasRootSsl: boolean
         let rootDomain: string
@@ -248,11 +280,21 @@ class LoadBalancerManager {
         rootDomain: string
     ) {
         const servers: IServerBlockDetails[] = []
+        const self = this
+        let apps: IAllAppDefinitions
 
         return dataStore
             .getAppsDataStore()
             .getAppDefinitions()
-            .then(function (apps) {
+            .then(function (loadedApps) {
+                apps = loadedApps
+            })
+            .then(function () {
+                return dataStore.getGoAccessInfo()
+            })
+            .then(function (goAccessInfo) {
+                const logAccess = goAccessInfo.isEnabled
+
                 Object.keys(apps).forEach(function (appName) {
                     const webApp = apps[appName]
                     const httpBasicAuth =
@@ -284,6 +326,12 @@ class LoadBalancerManager {
                     serverWithSubDomain.nginxConfigTemplate =
                         nginxConfigTemplate
                     serverWithSubDomain.httpBasicAuth = httpBasicAuth
+                    serverWithSubDomain.logAccessPath = logAccess
+                        ? self.getLogPath(
+                              appName,
+                              serverWithSubDomain.publicDomain
+                          )
+                        : undefined
 
                     if (
                         webApp.redirectDomain &&
@@ -315,6 +363,9 @@ class LoadBalancerManager {
                                 staticWebRoot: '',
                                 customErrorPagesDirectory: '',
                                 httpBasicAuth: httpBasicAuth,
+                                logAccessPath: logAccess
+                                    ? self.getLogPath(appName, d.publicDomain)
+                                    : undefined,
                             }
                             if (
                                 webApp.redirectDomain &&
@@ -350,6 +401,31 @@ class LoadBalancerManager {
             CaptainConstants.letsEncryptEtcPathOnNginx +
             self.certbotManager.getKeyRelativePathForDomain(domainName)
         )
+    }
+
+    getLogPath(appName: string, domainName: string) {
+        return `${CaptainConstants.nginxSharedLogsPath}/${this.getLogName(appName, domainName)}`
+    }
+
+    getLogName(appName: string, domainName: string) {
+        return `${appName}--${domainName}--access.log`
+    }
+
+    // Parses out the app and domain name from the log path original constructed in getLogPath
+    // then updated when processing the logs into file names that have timestamps that look like
+    // appname--some-alias.localhost--access.log--2024-10-30T01:50.html
+    // or appname--speed4.captain.localhost--access.log--Current.html
+    parseLogPath(logPath: string): { domainName: string; fileName: string } {
+        const splitName = logPath.split('--')
+        const fileName =
+            splitName.length > 3
+                ? `${splitName[3].replace('.html', '')}`
+                : logPath
+
+        return {
+            domainName: splitName[1],
+            fileName,
+        }
     }
 
     getInfo() {
@@ -398,8 +474,9 @@ class LoadBalancerManager {
         })
     }
 
-    createRootConfFile(dataStore: DataStore) {
+    createRootConfFile() {
         const self = this
+        const dataStore = self.dataStore
 
         const captainDomain = `${
             CaptainConstants.configs.captainSubDomain
@@ -407,6 +484,7 @@ class LoadBalancerManager {
         const registryDomain = `${
             CaptainConstants.registrySubDomain
         }.${dataStore.getRootDomain()}`
+        let logAccess = false
 
         let hasRootSsl = false
 
@@ -418,6 +496,10 @@ class LoadBalancerManager {
 
         return Promise.resolve()
             .then(function () {
+                return dataStore.getGoAccessInfo()
+            })
+            .then(function (goAccessInfo) {
+                logAccess = goAccessInfo.isEnabled
                 return dataStore.getNginxConfig()
             })
             .then(function (nginxConfig) {
@@ -458,6 +540,9 @@ class LoadBalancerManager {
                             CaptainConstants.nginxStaticRootDir +
                             CaptainConstants.nginxDomainSpecificHtmlDir
                         }/${captainDomain}`,
+                        logAccessPath: logAccess
+                            ? CaptainConstants.nginxSharedLogsPath
+                            : undefined,
                     },
                     registry: {
                         crtPath: self.getSslCertPath(registryDomain),
@@ -519,7 +604,7 @@ class LoadBalancerManager {
             })
     }
 
-    ensureDhParamFileExists(dataStore: DataStore) {
+    ensureDhParamFileExists() {
         const self = this
         return fs
             .pathExists(DH_PARAMS_FILE_PATH_ON_HOST) //
@@ -558,7 +643,7 @@ class LoadBalancerManager {
                     `openssl dhparam -out ${DH_PARAMS_FILE_PATH_ON_HOST} 2048`
                 ).then(function () {
                     Logger.d('Updating Load Balancer - ensureDhParamFileExists')
-                    return self.rePopulateNginxConfigFile(dataStore)
+                    return self.rePopulateNginxConfigFile()
                 })
             })
             .catch((err) => Logger.e(err))
@@ -582,10 +667,18 @@ class LoadBalancerManager {
                             protocol: 'tcp',
                             publishMode: 'host',
                             containerPort: 80,
-                            hostPort: CaptainConstants.nginxPortNumber,
+                            hostPort:
+                                CaptainConstants.configs.nginxPortNumber80,
                         },
                         {
                             protocol: 'tcp',
+                            publishMode: 'host',
+                            containerPort: 443,
+                            hostPort:
+                                CaptainConstants.configs.nginxPortNumber443,
+                        },
+                        {
+                            protocol: 'udp',
                             publishMode: 'host',
                             containerPort: 443,
                             hostPort: 443,
@@ -681,12 +774,6 @@ class LoadBalancerManager {
                 )
             })
             .then(function () {
-                Logger.d(
-                    'Updating Load Balancer - Setting up NGINX conf file...'
-                )
-                return self.rePopulateNginxConfigFile(dataStore, true)
-            })
-            .then(function () {
                 return fs.ensureDir(CaptainConstants.letsEncryptEtcPath)
             })
             .then(function () {
@@ -731,6 +818,12 @@ class LoadBalancerManager {
                 }
             })
             .then(function () {
+                Logger.d(
+                    'Updating Load Balancer - Setting up NGINX conf file...'
+                )
+                return self.rePopulateNginxConfigFile()
+            })
+            .then(function () {
                 Logger.d('Updating NGINX service...')
 
                 return dockerApi.updateService(
@@ -763,6 +856,11 @@ class LoadBalancerManager {
                             containerPath:
                                 CaptainConstants.nginxSharedPathOnNginx,
                             hostPath: CaptainConstants.nginxSharedPathOnHost,
+                        },
+                        {
+                            hostPath:
+                                CaptainConstants.nginxSharedLogsPathOnHost,
+                            containerPath: CaptainConstants.nginxSharedLogsPath,
                         },
                     ],
                     [CaptainConstants.captainNetworkName],
@@ -801,9 +899,9 @@ class LoadBalancerManager {
                 // Ensure DH Params exists
                 // First attempt to renew certs in
                 setTimeout(function () {
-                    self.ensureDhParamFileExists(dataStore) //
+                    self.ensureDhParamFileExists() //
                         .then(function () {
-                            return self.renewAllCertsAndReload(dataStore)
+                            return self.renewAllCertsAndReload()
                         })
                         .catch((err) => {
                             Logger.e(err)
@@ -812,25 +910,28 @@ class LoadBalancerManager {
             })
     }
 
-    renewAllCertsAndReload(dataStore: DataStore) {
+    renewAllCertsAndReload() {
         const self = this
 
         // before doing renewal, let's schedule the next one in 20.3 hours!
         // this random schedule helps to avoid retrying at the same time of
         // the day in case if that's our super high traffic time
 
-        setTimeout(function () {
-            self.renewAllCertsAndReload(dataStore) //
-                .catch((err) => {
-                    Logger.e(err)
-                })
-        }, 1000 * 3600 * 20.3)
+        setTimeout(
+            function () {
+                self.renewAllCertsAndReload() //
+                    .catch((err) => {
+                        Logger.e(err)
+                    })
+            },
+            1000 * 3600 * 20.3
+        )
 
         return self.certbotManager
             .renewAllCerts() //
             .then(function () {
                 Logger.d('Updating Load Balancer - renewAllCerts')
-                return self.rePopulateNginxConfigFile(dataStore)
+                return self.rePopulateNginxConfigFile()
             })
     }
 }

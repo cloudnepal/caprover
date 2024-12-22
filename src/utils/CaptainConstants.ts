@@ -17,7 +17,7 @@ const CONSTANT_FILE_OVERRIDE_USER =
 const configs = {
     publishedNameOnDockerHub: 'caprover/caprover',
 
-    version: '1.11.1',
+    version: '1.13.3',
 
     defaultMaxLogSize: '512m',
 
@@ -37,11 +37,13 @@ const configs = {
 
     netDataImageName: 'caprover/netdata:v1.34.1',
 
+    goAccessImageName: 'caprover/goaccess:1.9.3',
+
     registryImageName: 'registry:2',
 
     appPlaceholderImageName: 'caprover/caprover-placeholder-app:latest',
 
-    nginxImageName: 'nginx:1.24',
+    nginxImageName: 'nginx:1.27.2',
 
     defaultEmail: 'runner@caprover.com',
 
@@ -55,9 +57,16 @@ const configs = {
 
     analyticsDomain: 'https://analytics-v1.caprover.com',
 
-    certbotImageName: 'caprover/certbot-sleeping:v1.6.0',
+    certbotImageName: 'caprover/certbot-sleeping:v2.11.0',
 
     certbotCertCommandRules: undefined as CertbotCertCommandRule[] | undefined,
+
+    // this is added in 1.13 just as a safety - remove this after 1.14
+    disableEncryptedCheck: false,
+
+    nginxPortNumber80: 80,
+
+    nginxPortNumber443: 443,
 }
 
 export interface CertbotCertCommandRule {
@@ -102,6 +111,10 @@ const data = {
 
     nginxDefaultHtmlDir: '/default',
 
+    nginxSharedLogsPath: '/var/log/nginx-shared',
+
+    goAccessCrontabPath: '/var/spool/cron/crontabs/root',
+
     letsEncryptEtcPathOnNginx: '/letencrypt/etc',
 
     nginxDomainSpecificHtmlDir: '/domains',
@@ -134,6 +147,8 @@ const data = {
     perAppNginxConfigPathBase:
         CAPTAIN_ROOT_DIRECTORY_GENERATED + '/nginx/conf.d',
 
+    goaccessConfigPathBase: CAPTAIN_ROOT_DIRECTORY_GENERATED + '/goaccess',
+
     captainDataDirectory: CAPTAIN_DATA_DIRECTORY,
 
     letsEncryptLibPath: CAPTAIN_DATA_DIRECTORY + '/letencrypt/lib',
@@ -143,6 +158,8 @@ const data = {
     registryPathOnHost: CAPTAIN_DATA_DIRECTORY + '/registry',
 
     nginxSharedPathOnHost: CAPTAIN_DATA_DIRECTORY + '/nginx-shared',
+
+    nginxSharedLogsPathOnHost: CAPTAIN_DATA_DIRECTORY + '/shared-logs',
 
     debugSourceDirectory: '', // Only used in debug mode
 
@@ -156,6 +173,8 @@ const data = {
 
     certbotServiceName: 'captain-certbot',
 
+    goAccessContainerName: 'captain-goaccess-container',
+
     netDataContainerName: 'captain-netdata-container',
 
     registryServiceName: 'captain-registry',
@@ -165,8 +184,6 @@ const data = {
     captainRegistryUsername: 'captain',
 
     // ********************* HTTP Related Constants  ************************
-
-    nginxPortNumber: 80,
 
     netDataRelativePath: '/net-data-monitor',
 
@@ -205,7 +222,7 @@ function overrideConfigFromFile(fileName: string) {
             }
 
             console.log(`Overriding ${prop} from ${fileName}`)
-            // @ts-ignore
+            // @ts-expect-error "this actually works"
             configs[prop] = overridingValuesConfigs[prop]
         }
     }
@@ -229,7 +246,7 @@ if (data.isDebug) {
 
     data.debugSourceDirectory = devDirectoryOnLocalMachine
     data.configs.publishedNameOnDockerHub = 'captain-debug'
-    data.nginxPortNumber = 80
+    data.configs.nginxPortNumber80 = 80
 }
 
 export default data

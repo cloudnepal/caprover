@@ -9,10 +9,12 @@ import httpProxyImport = require('http-proxy')
 import * as http from 'http'
 import ApiStatusCodes from './api/ApiStatusCodes'
 import BaseApi from './api/BaseApi'
+import DockerApi from './docker/DockerApi'
 import InjectionExtractor from './injection/InjectionExtractor'
 import * as Injector from './injection/Injector'
 import DownloadRouter from './routes/download/DownloadRouter'
 import LoginRouter from './routes/login/LoginRouter'
+import ThemePublicRouter from './routes/public/ThemePublicRouter'
 import UserRouter from './routes/user/UserRouter'
 import CaptainManager from './user/system/CaptainManager'
 import CaptainConstants from './utils/CaptainConstants'
@@ -196,6 +198,15 @@ app.use(API_PREFIX + ':apiVersionFromRequest/', function (req, res, next) {
         return
     }
 
+    if (DockerApi.get().dockerNeedsUpdate) {
+        const response = new BaseApi(
+            ApiStatusCodes.STATUS_ERROR_GENERIC,
+            'Docker version is too old. Please update Docker to use CapRover.'
+        )
+        res.send(response)
+        return
+    }
+
     next()
 })
 
@@ -205,6 +216,7 @@ app.use(
     API_PREFIX + CaptainConstants.apiVersion + '/downloads/',
     DownloadRouter
 )
+app.use(API_PREFIX + CaptainConstants.apiVersion + '/theme/', ThemePublicRouter)
 
 // secured end points
 app.use(API_PREFIX + CaptainConstants.apiVersion + '/user/', UserRouter)

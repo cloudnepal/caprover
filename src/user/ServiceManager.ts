@@ -1,6 +1,19 @@
 import ApiStatusCodes from '../api/ApiStatusCodes'
 import DataStore from '../datastore/DataStore'
 import DockerApi, { IDockerUpdateOrders } from '../docker/DockerApi'
+import {
+    AppDeployTokenConfig,
+    IAppDef,
+    IAppEnvVar,
+    IAppPort,
+    IAppTag,
+    IAppVolume,
+    IHttpAuth,
+    RepoInfo,
+} from '../models/AppDefinition'
+import { DockerAuthObj } from '../models/DockerAuthObj'
+import { IHashMapGeneric } from '../models/ICacheGeneric'
+import { IImageSource } from '../models/IImageSource'
 import { PreDeployFunction } from '../models/OtherTypes'
 import CaptainConstants from '../utils/CaptainConstants'
 import Logger from '../utils/Logger'
@@ -587,6 +600,7 @@ class ServiceManager {
 
     updateAppDefinition(
         appName: string,
+        projectId: string,
         description: string,
         instanceCount: number,
         captainDefinitionRelativeFilePath: string,
@@ -613,6 +627,8 @@ class ServiceManager {
 
         let serviceName: string
 
+        let existingAppDefinition: IAppDef
+
         const checkIfNodeIdExists = function (nodeIdToCheck: string) {
             return dockerApi.getNodesInfo().then(function (nodeInfo) {
                 for (let i = 0; i < nodeInfo.length; i++) {
@@ -629,6 +645,16 @@ class ServiceManager {
         }
 
         return Promise.resolve()
+            .then(function () {
+                projectId = `${projectId || ''}`.trim()
+                if (projectId) {
+                    return dataStore
+                        .getProjectsDataStore()
+                        .getProject(projectId)
+
+                    // if project is not found, it will throw an error
+                }
+            })
             .then(function () {
                 return self.ensureNotBuilding(appName)
             })
@@ -704,10 +730,16 @@ class ServiceManager {
                 }
             })
             .then(function () {
+                return dataStore.getAppsDataStore().getAppDefinition(appName)
+            })
+            .then(function (appDef) {
+                existingAppDefinition = appDef
+
                 return dataStore
                     .getAppsDataStore()
                     .updateAppDefinitionInDb(
                         appName,
+                        projectId,
                         description,
                         instanceCount,
                         captainDefinitionRelativeFilePath,
@@ -733,8 +765,62 @@ class ServiceManager {
             .then(function () {
                 return self.ensureServiceInitedAndUpdated(appName)
             })
-            .then(function () {
-                return self.reloadLoadBalancer()
+            .catch(function (error) {
+                if (
+                    error &&
+                    error.captainErrorType ===
+                        ApiStatusCodes.STATUS_ERROR_NGINX_VALIDATION_FAILED
+                ) {
+                    // Revert back to the old definition because the nginx config is invalid
+                    if (existingAppDefinition) {
+                        Logger.d(
+                            `nginx validation failed, reverting configs for: ${appName}`
+                        )
+                        return dataStore
+                            .getAppsDataStore()
+                            .updateAppDefinitionInDb(
+                                appName,
+                                existingAppDefinition.projectId,
+                                existingAppDefinition.description,
+                                existingAppDefinition.instanceCount,
+                                existingAppDefinition.captainDefinitionRelativeFilePath,
+                                existingAppDefinition.envVars,
+                                existingAppDefinition.volumes,
+                                existingAppDefinition.tags || [],
+                                existingAppDefinition.nodeId || '',
+                                existingAppDefinition.notExposeAsWebApp,
+                                existingAppDefinition.containerHttpPort || 80,
+                                existingAppDefinition.httpAuth,
+                                existingAppDefinition.forceSsl,
+                                existingAppDefinition.ports,
+                                existingAppDefinition.appPushWebhook
+                                    ?.repoInfo || {
+                                    repo: '',
+                                    branch: '',
+                                    user: '',
+                                    password: '',
+                                },
+                                self.authenticator,
+                                existingAppDefinition.customNginxConfig || '',
+                                existingAppDefinition.redirectDomain || '',
+                                existingAppDefinition.preDeployFunction || '',
+                                existingAppDefinition.serviceUpdateOverride ||
+                                    '',
+                                existingAppDefinition.websocketSupport,
+                                existingAppDefinition.appDeployTokenConfig || {
+                                    enabled: false,
+                                }
+                            )
+                            .then(function () {
+                                self.reloadLoadBalancer()
+                            })
+                            .then(function () {
+                                throw error
+                            })
+                    }
+                }
+
+                throw error
             })
     }
 
@@ -910,9 +996,7 @@ class ServiceManager {
     reloadLoadBalancer() {
         Logger.d('Updating Load Balancer - ServiceManager')
         const self = this
-        return self.loadBalancerManager.rePopulateNginxConfigFile(
-            self.dataStore
-        )
+        return self.loadBalancerManager.rePopulateNginxConfigFile()
     }
 }
 

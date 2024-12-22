@@ -1,5 +1,37 @@
 ## [Next Version - available as `edge`]
 
+-   TBD
+
+## [1.13.3] - 2024-12-01
+
+-   Critical security patches
+-   Added UDP port mapping for nginx to allow http/3
+
+## [1.13.2] - 2024-11-09
+
+-   Fixed crash on private registry without push auth [ca9831](https://github.com/caprover/caprover/commit/ca9831399e05de9144cfd1fb63c9f88790a4cad2)
+-   Fixed local timestamp issue [PR-169](https://github.com/caprover/caprover-frontend/pull/169)
+-   Fixed line wrap issue with Firefox [issue-2179](https://github.com/caprover/caprover/issues/2179)
+-   Fixed some translation issues
+
+## [1.13.1] - 2024-10-19
+
+-   Fixed an auth issue on frontend [cd916c](https://github.com/caprover/caprover-frontend/commit/cd916c53c4b15ec3f71863075dc4d2a729e2266e)
+
+## [1.13.0] - 2024-10-19
+
+-   New: Added project structure [issue-158](https://github.com/caprover/caprover-frontend/pull/158)
+-   New: Added translations in multiple languages [issue-159](https://github.com/caprover/caprover-frontend/pull/159)
+-   New: Added themes! Now you can pick your favorite theme or build a new one! [issue-160](https://github.com/caprover/caprover-frontend/pull/160)
+-   New: Added automatic IP fallback on installation [ca196e5](https://github.com/caprover/caprover/commit/ca196e51be2df80836ff027a99bb92dde83c4f7f)
+-   New: Disallow passphrase protected SSH keys [issue-2153](https://github.com/caprover/caprover/issues/2153)
+-   Fixed: Deploy time now uses the proper locale [issue-157](https://github.com/caprover/caprover-frontend/issues/157)
+-   Fixed: The app log box is resizable again [issue-2112](https://github.com/caprover/caprover/issues/2112)
+-   Fixed: Showing the missing timezones due to daylight saving time [issue-2110](https://github.com/caprover/caprover/issues/2110)
+-   Fixed: Log Search filter crash on invalid Regex [issue-2128](https://github.com/caprover/caprover/issues/2128)
+
+## [1.12.0] - 2024-08-17
+
 **IMPORTANT**: this version bumps the minimum Docker API to 1.43. Please run `docker version | grep API` before upgrading your CapRover installation.
 
 -   New: Ability to delete multiple apps at once
@@ -9,6 +41,8 @@
 -   New: Added support for Docker capabilities (enabling VPN one click apps etc)
 -   Improved: Now the redirects include the path
 -   Improved: SSH key handling to avoid human mistakes
+-   Security: Updated npm dependencies security update
+-   Security: Updated Certbot image (2.11.0)
 
 ## [1.11.1] - 2023-09-16
 

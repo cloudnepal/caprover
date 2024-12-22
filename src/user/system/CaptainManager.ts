@@ -3,10 +3,11 @@ import ApiStatusCodes from '../../api/ApiStatusCodes'
 import DataStore from '../../datastore/DataStore'
 import DataStoreProvider from '../../datastore/DataStoreProvider'
 import DockerApi from '../../docker/DockerApi'
+import { GoAccessInfo } from '../../models/GoAccessInfo'
 import { IRegistryInfo, IRegistryTypes } from '../../models/IRegistryInfo'
+import { NetDataInfo } from '../../models/NetDataInfo'
 import CaptainConstants from '../../utils/CaptainConstants'
 import Logger from '../../utils/Logger'
-import MigrateCaptainDuckDuck from '../../utils/MigrateCaptainDuckDuck'
 import Utils from '../../utils/Utils'
 import Authenticator from '../Authenticator'
 import FeatureFlags from '../FeatureFlags'
@@ -213,18 +214,6 @@ class CaptainManager {
                 return dataStore.setEncryptionSalt(self.getCaptainSalt())
             })
             .then(function () {
-                return new MigrateCaptainDuckDuck(
-                    dataStore,
-                    Authenticator.getAuthenticator(dataStore.getNameSpace())
-                )
-                    .migrateIfNeeded()
-                    .then(function (migrationPerformed) {
-                        if (migrationPerformed) {
-                            return self.resetSelf()
-                        }
-                    })
-            })
-            .then(function () {
                 return loadBalancerManager.init(myNodeId, dataStore)
             })
             .then(function () {
@@ -259,6 +248,13 @@ class CaptainManager {
             })
             .then(function () {
                 return self.diskCleanupManager.init()
+            })
+            .then(function () {
+                return self.dataStore.getGoAccessInfo()
+            })
+            .then(function (goAccessInfo) {
+                // Ensure GoAccess container restart
+                return self.updateGoAccessInfo(goAccessInfo)
             })
             .then(function () {
                 self.inited = true
@@ -683,6 +679,83 @@ class CaptainManager {
             })
     }
 
+    updateGoAccessInfo(goAccessInfo: GoAccessInfo) {
+        const self = this
+        const dockerApi = this.dockerApi
+        const enabled = goAccessInfo.isEnabled
+
+        // Validate cron schedules
+        if (!Utils.validateCron(goAccessInfo.data.rotationFrequencyCron)) {
+            throw ApiStatusCodes.createError(
+                ApiStatusCodes.ILLEGAL_PARAMETER,
+                'Invalid cron schedule'
+            )
+        }
+
+        const crontabFilePath = `${
+            CaptainConstants.goaccessConfigPathBase
+        }/crontab.txt`
+
+        return Promise.resolve()
+            .then(function () {
+                return self.dataStore.setGoAccessInfo(goAccessInfo)
+            })
+            .then(function () {
+                const cronFile = [
+                    `${goAccessInfo.data.rotationFrequencyCron} /processLogs.sh`,
+                ].join('\n')
+
+                return fs.outputFile(crontabFilePath, cronFile)
+            })
+            .then(function () {
+                return dockerApi.ensureContainerStoppedAndRemoved(
+                    CaptainConstants.goAccessContainerName,
+                    CaptainConstants.captainNetworkName
+                )
+            })
+            .then(function () {
+                if (enabled) {
+                    return dockerApi.createStickyContainer(
+                        CaptainConstants.goAccessContainerName,
+                        CaptainConstants.configs.goAccessImageName,
+                        [
+                            {
+                                hostPath:
+                                    CaptainConstants.nginxSharedLogsPathOnHost,
+                                containerPath:
+                                    CaptainConstants.nginxSharedLogsPath,
+                                mode: 'rw',
+                            },
+                            {
+                                hostPath: crontabFilePath,
+                                containerPath:
+                                    CaptainConstants.goAccessCrontabPath,
+                                mode: 'ro',
+                            },
+                        ],
+                        CaptainConstants.captainNetworkName,
+                        [
+                            {
+                                key: 'LOG_RETENTION_DAYS',
+                                value: (
+                                    goAccessInfo.data.logRetentionDays ?? -1
+                                ).toString(),
+                            },
+                        ],
+                        [],
+                        ['apparmor:unconfined'],
+                        undefined
+                    )
+                }
+            })
+            .then(function () {
+                Logger.d(
+                    'Updating Load Balancer - CaptainManager.updateGoAccess'
+                )
+                return self.loadBalancerManager.rePopulateNginxConfigFile()
+            })
+    }
+
     getNodesInfo() {
         const dockerApi = this.dockerApi
 
@@ -731,9 +804,7 @@ class CaptainManager {
             })
             .then(function () {
                 Logger.d('Updating Load Balancer - CaptainManager.enableSsl')
-                return self.loadBalancerManager.rePopulateNginxConfigFile(
-                    self.dataStore
-                )
+                return self.loadBalancerManager.rePopulateNginxConfigFile()
             })
     }
 
@@ -782,12 +853,47 @@ class CaptainManager {
 
     setNginxConfig(baseConfig: string, captainConfig: string) {
         const self = this
+        let existingConfigs: {
+            baseConfig: {
+                byDefault: string
+                customValue: any
+            }
+            captainConfig: {
+                byDefault: string
+                customValue: any
+            }
+        }
         return Promise.resolve()
             .then(function () {
+                return self.dataStore.getNginxConfig()
+            })
+            .then(function (configs) {
+                existingConfigs = configs
                 return self.dataStore.setNginxConfig(baseConfig, captainConfig)
             })
             .then(function () {
-                self.resetSelf()
+                return self.loadBalancerManager.rePopulateNginxConfigFile()
+            })
+            .catch(function (error) {
+                if (
+                    error &&
+                    error.captainErrorType ===
+                        ApiStatusCodes.STATUS_ERROR_NGINX_VALIDATION_FAILED
+                ) {
+                    Logger.d(
+                        "Nginx validation failed. Reverting changes in system's nginx configs..."
+                    )
+                    self.dataStore
+                        .setNginxConfig(
+                            existingConfigs.baseConfig.customValue,
+                            existingConfigs.captainConfig.customValue
+                        )
+
+                        .then(function () {
+                            return self.loadBalancerManager.rePopulateNginxConfigFile()
+                        })
+                }
+                throw error
             })
     }
 
@@ -797,7 +903,7 @@ class CaptainManager {
         // We still allow users to specify the domains in their DNS settings individually
         // SubDomains that need to be added are "captain." "registry." "app-name."
         const url = `${uuid()}.${requestedCustomDomain}:${
-            CaptainConstants.nginxPortNumber
+            CaptainConstants.configs.nginxPortNumber80
         }`
 
         return self.domainResolveChecker
@@ -861,9 +967,7 @@ class CaptainManager {
                 Logger.d(
                     'Updating Load Balancer - CaptainManager.changeCaptainRootDomain'
                 )
-                return self.loadBalancerManager.rePopulateNginxConfigFile(
-                    self.dataStore
-                )
+                return self.loadBalancerManager.rePopulateNginxConfigFile()
             })
     }
 

@@ -1,20 +1,30 @@
 import Base64Provider = require('js-base64')
 import Docker = require('dockerode')
 import { v4 as uuid } from 'uuid'
+import {
+    IAppDef,
+    IAppEnvVar,
+    IAppPort,
+    IAppVolume,
+    VolumesTypes,
+} from '../models/AppDefinition'
+import { DockerAuthObj, DockerRegistryConfig } from '../models/DockerAuthObj'
+import { DockerSecret } from '../models/DockerSecret'
 import DockerService from '../models/DockerService'
+import { IHashMapGeneric } from '../models/ICacheGeneric'
 import {
     IDockerApiPort,
     IDockerContainerResource,
     PreDeployFunction,
-    VolumesTypes,
 } from '../models/OtherTypes'
+import { ServerDockerInfo } from '../models/ServerDockerInfo'
 import BuildLog from '../user/BuildLog'
 import CaptainConstants from '../utils/CaptainConstants'
 import EnvVars from '../utils/EnvVars'
 import Logger from '../utils/Logger'
 import Utils from '../utils/Utils'
 import Dockerode = require('dockerode')
-// @ts-ignore
+// @ts-expect-error "TODO"
 import dockerodeUtils = require('dockerode/lib/util')
 
 const Base64 = Base64Provider.Base64
@@ -55,8 +65,41 @@ export abstract class IDockerUpdateOrders {
 }
 export type IDockerUpdateOrder = 'auto' | 'stopFirst' | 'startFirst'
 
+export interface CreateContainerParams {
+    containerName?: string
+    imageName: string
+
+    /** Override command to run the container with */
+    command?: string[]
+
+    /** an array, hostPath & containerPath, mode */
+    volumes: IAppVolume[]
+    network: string
+
+    /**
+     *
+     * [
+     *    {
+     *        key: 'somekey'
+     *        value: 'some value'
+     *    }
+     * ]
+     */
+    arrayOfEnvKeyAndValue: IAppEnvVar[]
+    addedCapabilities?: string[]
+    addedSecOptions?: string[]
+    authObj?: DockerAuthObj
+    /** If true, have the container always restart,
+     * If false act as a one off job runner that cleans up after itself */
+    sticky: boolean
+    /** If set true, waits for the container to exit before returning */
+    wait?: boolean
+}
+
 class DockerApi {
     private dockerode: Docker
+
+    public dockerNeedsUpdate = false
 
     constructor(connectionParams: Docker.DockerOptions) {
         this.dockerode = new Docker(connectionParams)
@@ -491,7 +534,7 @@ class DockerApi {
     }
 
     /**
-     * Creates a volume thar restarts unless stopped
+     * Creates a container that restarts unless stopped
      * @param containerName
      * @param imageName
      * @param volumes     an array, hostPath & containerPath, mode
@@ -516,9 +559,40 @@ class DockerApi {
         addedSecOptions: string[],
         authObj: DockerAuthObj | undefined
     ) {
+        return this.createContainer({
+            containerName,
+            imageName,
+            volumes,
+            network,
+            arrayOfEnvKeyAndValue,
+            addedCapabilities,
+            addedSecOptions,
+            authObj,
+            sticky: true,
+        })
+    }
+
+    /**
+     * Creates a docker container
+     */
+    createContainer({
+        containerName,
+        imageName,
+        command,
+        volumes,
+        network,
+        arrayOfEnvKeyAndValue,
+        addedCapabilities,
+        addedSecOptions,
+        authObj,
+        sticky,
+        wait = false,
+    }: CreateContainerParams) {
         const self = this
 
-        Logger.d(`Creating Sticky Container: ${imageName}`)
+        Logger.d(
+            `Creating ${sticky ? 'Sticky' : 'Ephemeral'} Container: ${imageName}`
+        )
 
         const volumesMapped: string[] = []
         volumes = volumes || []
@@ -536,6 +610,8 @@ class DockerApi {
             envs.push(`${e.key}=${e.value}`)
         }
 
+        let container: Docker.Container | undefined = undefined
+
         return Promise.resolve()
             .then(function () {
                 return self.pullImage(imageName, authObj)
@@ -545,6 +621,7 @@ class DockerApi {
                     name: containerName,
                     Image: imageName,
                     Env: envs,
+                    Cmd: command,
                     HostConfig: {
                         Binds: volumesMapped,
                         CapAdd: addedCapabilities,
@@ -557,14 +634,26 @@ class DockerApi {
                                     CaptainConstants.configs.defaultMaxLogSize,
                             },
                         },
-                        RestartPolicy: {
-                            Name: 'always',
-                        },
+                        ...(sticky
+                            ? {
+                                  RestartPolicy: {
+                                      Name: 'always',
+                                  },
+                              }
+                            : {}),
+                        AutoRemove: !CaptainConstants.isDebug && !sticky,
                     },
                 })
             })
             .then(function (data) {
+                container = data
                 return data.start()
+            })
+            .then(function (startInfo) {
+                if (wait && container) {
+                    return container.wait()
+                }
+                return startInfo
             })
     }
 
@@ -1423,11 +1512,11 @@ class DockerApi {
 
                     switch (updateOrder) {
                         case IDockerUpdateOrders.AUTO:
-                            const existingVols =
-                                updatedData.TaskTemplate.ContainerSpec.Mounts ||
-                                []
                             updatedData.UpdateConfig.Order =
-                                existingVols.length > 0
+                                (
+                                    updatedData.TaskTemplate.ContainerSpec
+                                        .Mounts || []
+                                ).length > 0
                                     ? 'stop-first'
                                     : 'start-first'
                             break
@@ -1438,6 +1527,7 @@ class DockerApi {
                             updatedData.UpdateConfig.Order = 'stop-first'
                             break
                         default:
+                            // eslint-disable-next-line
                             const neverHappens: never = updateOrder
                             throw new Error(
                                 `Unknown update order! ${updateOrder}${neverHappens}`
@@ -1685,17 +1775,48 @@ const connectionParams: Docker.DockerOptions =
               socketPath: CaptainConstants.dockerSocketPath,
           }
         : dockerApiAddressSplited.length === 2
-        ? {
-              host: dockerApiAddressSplited[0],
-              port: Number(dockerApiAddressSplited[1]),
-          }
-        : {
-              host: `${dockerApiAddressSplited[0]}:${dockerApiAddressSplited[1]}`,
-              port: Number(dockerApiAddressSplited[2]),
-          }
+          ? {
+                host: dockerApiAddressSplited[0],
+                port: Number(dockerApiAddressSplited[1]),
+            }
+          : {
+                host: `${dockerApiAddressSplited[0]}:${dockerApiAddressSplited[1]}`,
+                port: Number(dockerApiAddressSplited[2]),
+            }
 
 connectionParams.version = CaptainConstants.configs.dockerApiVersion
-
 const dockerApiInstance = new DockerApi(connectionParams)
+
+const lowVersionDocker = JSON.parse(JSON.stringify(connectionParams))
+lowVersionDocker.version = 'v1.38'
+
+new Docker(lowVersionDocker)
+    .version()
+    .then((data) => {
+        Logger.d('Docker API Version on host: ' + data.ApiVersion)
+
+        const majorSupported = Number(data.ApiVersion.split('.')[0])
+        const minorSupported = Number(data.ApiVersion.split('.')[1])
+        const majorNeeded = Number(
+            CaptainConstants.configs.dockerApiVersion
+                .replace('v', '')
+                .split('.')[0]
+        )
+        const minorNeeded = Number(
+            CaptainConstants.configs.dockerApiVersion
+                .replace('v', '')
+                .split('.')[1]
+        )
+
+        if (
+            majorSupported < majorNeeded ||
+            (majorSupported === majorNeeded && minorSupported < minorNeeded)
+        ) {
+            dockerApiInstance.dockerNeedsUpdate = true
+        }
+    })
+    .catch((error) => {
+        Logger.e('Docker API Version Error: ' + error)
+    })
 
 export default DockerApi

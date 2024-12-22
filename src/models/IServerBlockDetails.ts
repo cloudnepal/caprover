@@ -1,4 +1,4 @@
-interface IServerBlockDetails {
+export interface IServerBlockDetails {
     hasSsl: boolean
     forceSsl: boolean
     websocketSupport: boolean
@@ -14,4 +14,5 @@ interface IServerBlockDetails {
     customErrorPagesDirectory: string
     staticWebRoot: string
     redirectToPath?: string
+    logAccessPath?: string
 }
